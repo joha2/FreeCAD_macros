@@ -1,0 +1,199 @@
+from __future__ import print_function
+
+import FreeCAD
+import FreeCADGui
+import Points
+
+def XtoGrayScale(t):
+	r = g = b = 0
+	if 0 <= t <= 1:
+		r = g = b = t
+	return (r, g, b)
+
+def XtoRGB(t):
+	d = 0.125 # 0 < d <= 1/4
+	r = g = b = 0
+	if t >= 0 and t <= 0.5 + d:
+		b = -8.*(t - 0.25)**2 + 1
+	if t >= d and t <= 1.-d:
+ 		g = -1./(d - 0.5)**2*(t - 0.5)**2 + 1.
+	if t >= 0.5 - d and t <= 1:
+	 	r = -8.*(t - 0.75)**2 + 1
+	return (r,g,b)
+
+# TODO: EntityFunction
+# has isEntityInsidePart function (tolerance, points on faces, all points or any points)
+# has markNodes() -1 Not marked, else position in list as marking reference
+# has default value (string)
+# has type (string)
+# has conversion (string -> type, type -> string)
+# types: (uint, bool, float, int)
+# markEntities[] dict for the entities which are marked
+# ViewObject for colorized mesh (?)
+
+
+class VertexFunction:
+	pass
+
+class FacetFunction:
+	pass
+
+class CellFunction:
+	def __init__(self, doc, mesh, value_default = 0, value_type = 'float', value_name = 'f'):
+		# TODO: cell function should be at the upper most level of the document
+		# TODO: it should be a document group (-> not practical since there is no priority for the underlying objects)
+		# TODO: there should be a link to mesh object
+		# TODO: if you add parts to the group they should have a override priority and a value
+		# TODO: PropertyStringList: triple (partlabel, value) list position -> priority
+		self.Document = doc # e.g. ActiveDocument
+		self.Object = doc.addObject("App::FeaturePython", value_name)
+		#self.Group.addObject(self.Object)
+		self.Object.addProperty("App::PropertyLink", "MeshLink", "CellFunction", "Link to mesh").MeshLink= mesh
+		self.Object.addProperty("App::PropertyStringList", "ToolParts", "CellFunction", "Parts list with values").ToolParts = ['Cylinder001 1', 'Cube001 2']
+		self.Object.addProperty("App::PropertyString", "Value_Type", "CellFunction", "Cell func type").Value_Type = value_type
+		self.Object.addProperty("App::PropertyFloat", "Value_Default", "CellFunction", "Cell func default value").Value_Default = value_default
+		self.Object.Proxy = self
+
+		self.CellValues = {}
+		
+	def markCells(self, celltuple, value = 0):
+		for c in celltuple:
+			self.CellValues[c] = value
+
+	def parseToolParts(self):
+		return [(p[0], float(p[1])) for p in [s.split() for s in self.Object.ToolParts] if len(p) == 2]
+
+	def setCellValues(self, toolpartslist):
+		nodes_checked = {}
+		for (ind, node) in self.Object.MeshLink.FemMesh.Nodes.iteritems():
+			nodes_checked[ind] = -1
+		for v in self.Object.MeshLink.FemMesh.Volumes:
+			self.CellValues[v] = self.Object.Value_Default
+
+
+		count_on_faces = True
+		tolerance = 1e-5
+
+		toolpartslist.reverse()
+
+		for (pos, (partstring, partvalue)) in enumerate(toolpartslist):
+			part = self.Document.getObjectsByLabel(partstring)[0]
+			print(partstring)
+			print(part)
+
+			for (ind, node) in self.Object.MeshLink.FemMesh.Nodes.iteritems():
+				if pos > nodes_checked[ind] and part.Shape.isInside(node, tolerance, count_on_faces):
+					nodes_checked[ind] = pos
+	
+			if self.Object.MeshLink.FemMesh.Volumes != ():
+				for v in self.Object.MeshLink.FemMesh.Volumes:
+					cell_selected = False
+					cell_selected = all([nodes_checked[n] == pos for n in self.Object.MeshLink.FemMesh.getElementNodes(v)])
+					if cell_selected:
+						self.CellValues[v] = partvalue
+			#elif mesh.FemMesh.Faces != ():
+			#	print("coloring face elements")
+			#	for v in mesh.FemMesh.Faces:
+			#		cell_selected = False
+			#		cell_selected = all([nodes_inside_part[n] for n in mesh.FemMesh.getElementNodes(v)])
+			#		if cell_selected:
+			#			highlighted_elements[v] = (1, 0, 0)
+			#		else:		
+			#			highlighted_elements[v] = (0, 0, 1)
+
+	def onChanged(self, fp, prop):
+		print(fp)
+		if prop.lower() == 'toolparts':
+			self.setCellValues(self.parseToolParts())
+			self.colorize()
+
+	def execute(self):
+		pass
+
+	def __getstate__(self):
+		return None
+
+	def __setstate__(self):
+		return None
+
+	
+	def colorize(self):
+		cfvalues = [val for val in self.CellValues.itervalues()]
+
+		maxval = max(cfvalues)
+		minval = min(cfvalues)
+
+		def scaleval(x):
+			return (x - minval)/(maxval - minval)
+
+
+		highlighted_elements = {}
+		for (key, val) in cf.CellValues.iteritems():
+			scaledval = scaleval(val)
+			
+			highlighted_elements[key] = XtoRGB(scaledval)
+		self.Object.MeshLink.ViewObject.ElementColor = highlighted_elements
+
+
+
+doc = FreeCAD.ActiveDocument
+sel = FreeCADGui.Selection.getCompleteSelection()
+
+def CorrectSelection(sel):
+	mesh = None	
+	if len(sel) == 1:
+		if 'FemMesh' in sel[0].PropertiesList:
+			mesh = sel[0]
+		if mesh == None:
+			print("No mesh found in selection")
+	else:
+		print("Please select one part (as tool) and one mesh")
+
+	return mesh
+
+
+
+if doc is not None:
+	pp = Points.Points()
+	mesh = CorrectSelection(sel)
+	if mesh is None:
+		print("Please select a FEM mesh")
+	else:
+		cf = CellFunction(doc, mesh)
+		cf.setCellValues(cf.parseToolParts())
+		cf.colorize()
+
+	#	mesh.ViewObject.HighlightedNodes = []
+		#mesh.ViewObject.HighlightedNodes = [ind for (ind, node) in mesh.FemMesh.Nodes.iteritems() if part.Shape.isInside(node, 1e-5, True)]
+	#	nodes_inside_part = {}
+	#	for (ind, node) in mesh.FemMesh.Nodes.iteritems():
+	#		nodes_inside_part[ind] = part.Shape.isInside(node, 1e-5, True)
+	#
+	#	highlighted_elements = {}
+	#	if mesh.FemMesh.Volumes != ():
+	#		print("coloring volume elements")
+	#		for v in mesh.FemMesh.Volumes:
+	#			cell_selected = False
+	#			cell_selected = all([nodes_inside_part[n] for n in mesh.FemMesh.getElementNodes(v)])
+	#			if cell_selected:
+	#				highlighted_elements[v] = XtoRGB(0.5)
+	#			else:		
+	#				highlighted_elements[v] = XtoRGB(1.0)
+	#	elif mesh.FemMesh.Faces != ():
+	#		print("coloring face elements")
+	#		for v in mesh.FemMesh.Faces:
+	#			cell_selected = False
+	#			cell_selected = all([nodes_inside_part[n] for n in mesh.FemMesh.getElementNodes(v)])
+	#			if cell_selected:
+	#				highlighted_elements[v] = (1, 0, 0)
+	#			else:		
+	#				highlighted_elements[v] = (0, 0, 1)
+	#			
+
+	
+	#	mesh.ViewObject.ElementColor = highlighted_elements
+	#pp.addPoints([node for node in mesh.FemMesh.Nodes.itervalues() if part.Shape.isInside(node, 1e-5, True)])
+	#Points.show(pp)
+		
+else:
+	print("No active document")
